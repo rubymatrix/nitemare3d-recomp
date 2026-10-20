@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nitemare-3D</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="n3d-web.css">
+</head>
+<body>
+<canvas id="canvas" tabindex="-1" oncontextmenu="event.preventDefault()"></canvas>
+
+<div id="mouse-hint" class="mouse-hint" hidden>Click to capture the mouse</div>
+
+<div id="overlay" class="overlay">
+  <div class="panel">
+    <h1>Nitemare-3D</h1>
+    <p id="status" class="status">Loading…</p>
+
+    <div id="need-data" hidden>
+      <p>This page runs the game, but the game files come from your own copy.
+         Choose the data files of an installed Nitemare-3D (Windows version):
+         <code>MAP.1</code>, <code>IMG.1</code>, <code>SND.DAT</code>, <code>UIF.DAT</code>,
+         <code>GAME.PAL</code>, <code>NITE3D.BSF</code> and, if you have them,
+         <code>MAP.2</code>/<code>MAP.3</code>, <code>IMG.2</code>/<code>IMG.3</code>,
+         <code>DEMO.1</code>, <code>ENDING.FLI</code>.</p>
+      <p class="hint">Optional: a General MIDI <code>.sf2</code> SoundFont for music, or pre-rendered
+         <code>tuneNN.ogg</code> files. The files stay in this browser (IndexedDB); nothing is uploaded.</p>
+      <div class="buttons">
+        <label class="button">Choose files…<input id="pick-files" type="file" multiple hidden></label>
+        <label class="button">Choose folder…<input id="pick-dir" type="file" webkitdirectory hidden></label>
+      </div>
+      <p class="hint">…or drop the files or the folder onto this page.</p>
+      <p id="missing" class="error" hidden></p>
+    </div>
+
+    <div id="ready" hidden>
+      <button id="play" class="button primary">Click to play</button>
+      <p class="hint">Arrows or W/A/S/D move, mouse turns, left button / Ctrl fires, right button / Space uses,
+         Esc menu. Alt+Enter or F11 toggles full screen.</p>
+      <p class="hint">Gamepad: left stick moves, right stick turns, RT fires, LT runs, A/X use,
+         LB/RB change weapon, Y automap, Start menu. Press a button to connect it.</p>
+      <p class="hint"><a href="#" id="forget">Forget the stored game files</a></p>
+    </div>
+
+    <div id="ended" hidden>
+      <p>The game has exited.</p>
+      <button class="button primary" onclick="location.reload()">Play again</button>
+    </div>
+  </div>
+</div>
+
+<script src="n3d-web.js"></script>
+<script src="nitemare3d.js" onload="n3dBoot()"></script>
+</body>
+</html>

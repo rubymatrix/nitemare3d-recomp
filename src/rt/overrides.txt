@@ -1,0 +1,7 @@
+# Functions replaced by hand-written C (src/rt/overrides.c). One "seg:off" per line.
+# tools/recomp.py skips them; the override must keep the original calling convention.
+1010:d6de   # draw 3D view: original body + hook for the native hi-res renderer
+1010:b9a6   # per-frame overlays over the view: frame decorations + message, weapon, extra
+1018:035a wrap  # draw a UIF picture clipped to the view: tag frame decorations by screen side
+1010:9758 wrap  # player tick: add WASD movement/strafe and mouse turning on top of the original controls
+1010:cbce wrap  # queue an object sprite: remember which objects the original animated this frame

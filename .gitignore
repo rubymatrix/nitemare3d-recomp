@@ -1,0 +1,24 @@
+# Build output
+build*/
+*.o
+__pycache__/
+.DS_Store
+
+# Original game files (copyrighted; extract from your own installer)
+original/
+
+# Generated from NITE3W.EXE by tools/build_gen.sh -- never commit
+src/gen/
+ghidra_proj/
+decomp/
+recomp/
+re/*
+!re/names.txt
+
+# Runtime debug output
+rt_trace.txt
+ds_dump.bin
+
+# Wrangler / Node
+node_modules/
+.wrangler/

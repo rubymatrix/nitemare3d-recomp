@@ -1,0 +1,2 @@
+Vendored from https://github.com/nothings/stb (stb_vorbis.c v1.22, master as of 2026-10-20).
+Public domain / MIT (see end of file).

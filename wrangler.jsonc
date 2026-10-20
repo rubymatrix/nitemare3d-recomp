@@ -1,0 +1,16 @@
+// Cloudflare Workers static-assets site for the browser build.
+// Build it first (README, "Hosting on Cloudflare"):
+//   emcmake cmake -S . -B build-web -G Ninja && cmake --build build-web
+//   python3 -I tools/web_site.py --data original/data
+//   wrangler deploy
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nitemare3d",
+  "compatibility_date": "2026-10-01",
+  "routes": [
+    { "pattern": "nitemare3d.everydaypreview.com", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./build-web/site"
+  }
+}
