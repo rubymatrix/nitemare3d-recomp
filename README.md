@@ -1,5 +1,7 @@
 # Nitemare-3D, rebuilt for modern computers
 
+![Nitemare-3D title screen, redrawn at high resolution](docs/images/splash.jpg)
+
 Nitemare-3D is a 1994 first-person horror game for Windows 3.1 by David P.
 Gray. This project makes the original game run on today's Mac, Linux and
 Windows computers, and in a web browser.
@@ -100,5 +102,6 @@ tools.
 
 Nitemare-3D is © David P. Gray / Gray Design Associates. This repository
 contains only new code and some open-source libraries (Nuked OPL3,
-TinySoundFont, stb_vorbis). It does not include the game itself. Don't
+TinySoundFont, stb_vorbis). It does not include the game itself. The picture at the top is an AI
+redraw of the game's original title screen. Don't
 commit game files or converted game code to it.
