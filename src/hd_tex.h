@@ -56,6 +56,9 @@ uint32_t hq_sample(const hq_tex *t, float u, float v, float fu, float fv);
  * from v0 in steps of dv; written to out[k * stride]. Same filtering as
  * hq_sample, much cheaper per texel. Thread-safe. */
 void hq_column(const hq_tex *t, float u, float fu, float v0, float dv, int n, uint32_t *out, int stride);
+/* Same, with filtering kept inside the texel span [umin, umax) of the
+ * texture that the surface actually shows (wall pieces). */
+void hq_column_span(const hq_tex *t, float u, float fu, float umin, float umax, float v0, float dv, int n, uint32_t *out, int stride);
 
 /* Build the colours of every texture hq_get returned since the last call
  * (in parallel). Call before sampling them. */

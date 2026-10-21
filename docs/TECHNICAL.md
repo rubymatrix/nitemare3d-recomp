@@ -162,7 +162,9 @@ switch away.
 | `--res window` | default: render resolution follows the window size |
 | `--res desktop` | render at the desktop resolution |
 | `--classic` (= `--res 320x200`) | the original frame only, shown at 4:3 |
-| `--fps N` | hi-res frame rate during play (default 60; `0` = every display refresh) |
+| `--fps N` | hi-res frame rate during play (default `0` = one frame per display refresh, vsync-paced; a fixed rate that doesn't divide the refresh rate judders) |
+| `--no-spaces` | macOS: fullscreen without a separate Space; fixes a horizontal tear in fullscreen on some displays |
+| `--renderer metal\|opengl` | SDL render backend (default: SDL's choice) |
 | `--filter nearest\|bilinear\|trilinear\|aniso` | texture filtering (default `aniso`) |
 | `--aniso N` | anisotropic taps, 1–16 (default 16) |
 | `--upscale none\|scale2x\|scale3x\|scale4x\|scale6x` | pixel-art upscaling of textures and sprites (default `scale4x`) |
@@ -493,3 +495,14 @@ take `--sb`:
 ./build/n3d-render-music --data original/data --sb sbpro1 --out original/data/music-sbpro
 ./build/nitemare3d --data original/data --fm --sb sb2 --music none
 ```
+
+## macOS app bundle
+
+`tools/make_macos_app.sh [ICON_1024.png] [HDPACK_DIR]` builds a self-contained
+`dist/Nitemare3D.app`: the release binary, SDL2, the game data from
+`original/data` (including a pre-rendered `music/` folder), an HD pack with only
+the splash and main-menu art (`HDPACK_ONLY=id,id` to change), and an icon made
+from the HD title screen. It launches fullscreen at the desktop resolution with
+`--no-spaces --filter aniso --aniso 16 --upscale scale6x`; pass extra options
+with `open dist/Nitemare3D.app --args ...`. The bundle contains the game data,
+so don't redistribute it unless you may.

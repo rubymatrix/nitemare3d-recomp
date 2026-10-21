@@ -494,7 +494,9 @@ static void m_waveOutOpen(void) { /* (HWAVEOUT FAR*, UINT dev, WAVEFORMAT FAR*, 
 }
 static void m_waveOutClose(void) { host_wave_stop(); ret16(0); }
 static void m_waveOutPrepareHeader(void) { ret16(0); }
-static void m_waveOutUnprepareHeader(void) { ret16(host_wave_playing() ? 33 /* WAVERR_STILLPLAYING */ : 0); }
+/* Never report WAVERR_STILLPLAYING: the game would then drop or cut off effects
+ * to keep its single channel; the host mixes them all instead. */
+static void m_waveOutUnprepareHeader(void) { ret16(0); }
 static void m_waveOutWrite(void) { /* (HWAVEOUT, WAVEHDR FAR*, UINT) */
     uint32_t hdr = A32(2);
     uint32_t data = MEMR32(hdr);

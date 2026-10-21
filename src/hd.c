@@ -81,7 +81,7 @@ static int *col_vec;
 static float *col_t;
 /* per column texturing (filled serially, drawn in parallel) */
 static const hq_tex **col_tex;
-static float *col_u, *col_fu;
+static float *col_u, *col_fu, *col_umin, *col_umax;
 static size_t col_cap;
 
 static uint8_t ov_col[64000], ov_anchor[64000]; /* overlays drawn over the view (320x200 coords) */
@@ -177,8 +177,9 @@ typedef struct {
     uint8_t pstate[8];
     int16_t pxy[8][2];
 } snap_t;
-static snap_t snaps[2];
-static snap_t *sp_prev = &snaps[0], *sp_cur = &snaps[1];
+static snap_t snaps[3];
+static snap_t *sp_old = &snaps[0], *sp_prev = &snaps[1], *sp_cur = &snaps[2]; /* game frames k-2, k-1, k */
+static const snap_t *sp_a = &snaps[1], *sp_b = &snaps[2]; /* the pair the frame being drawn lies between */
 static double mouse_cum;  /* whole mouse degrees applied to the game angle, ever */
 static int exact_camera;  /* debug comparison: draw game memory as is */
 void hd_note_mouse_turn(int degrees) { mouse_cum += degrees; }
@@ -189,11 +190,29 @@ static double wrap180(double a) {
     return a;
 }
 
+/* When the game frame being drawn was due. The game draws a frame when
+ * floor(ms * fps / 1000) of its clock advances (FUN_1010_d69c: fps DS:53e4,
+ * frame number DS:0234), so frame k belongs at exactly k * 1000 / fps ms.
+ * Using that instead of the moment the host loop got around to running the
+ * game keeps the interpolation steps exact (vsync waits in the loop make the
+ * latter late by up to a display refresh, which made walls jitter). */
+static uint64_t game_frame_time_us(void) {
+    uint64_t now = host_time_us();
+    int fps = ds16(0x53e4);
+    uint32_t slot = (uint32_t)ds32(0x0234);
+    if (fps <= 0 || fps > 1000) return now;
+    uint64_t ms = ((uint64_t)slot * 1000 + (uint64_t)fps - 1) / (uint64_t)fps; /* first ms of the slot */
+    uint64_t t = host_clock_base_us() + ms * 1000;
+    if (t > now || now - t > 200000) return now; /* clock wrapped or not this frame: fall back */
+    return t;
+}
+
 static void take_snapshot(void) {
-    snap_t *t = sp_prev;
+    snap_t *t = sp_old;
+    sp_old = sp_prev;
     sp_prev = sp_cur;
     sp_cur = t;
-    t->t = host_time_us();
+    t->t = game_frame_time_us();
     t->valid = 1;
     if (getenv("N3D_TURNLOG")) fprintf(stderr, "snap %llu\n", (unsigned long long)(t->t / 1000));
     t->px = ds16(0x4be6);
@@ -221,16 +240,33 @@ static void take_snapshot(void) {
     /* first frame, new level, teleports (loaded game) and pauses: no blending */
     double dx = sp_cur->px - sp_prev->px, dy = sp_cur->py - sp_prev->py;
     if (!sp_prev->valid || sp_prev->nvec != sp_cur->nvec || dx * dx + dy * dy > 64.0 * 64.0 || sp_cur->t - sp_prev->t > 150000)
-        *sp_prev = *sp_cur;
+        *sp_old = *sp_prev = *sp_cur;
+    else if (!sp_old->valid || sp_old->nvec != sp_prev->nvec)
+        *sp_old = *sp_prev;
 }
 
-/* interpolation factor 0..1 between the two snapshots */
+/* Choose the snapshot pair for the frame being drawn and the position
+ * between them. Drawn a little behind the game clock (INTERP_DELAY_US) and
+ * allowed to run slightly past the newest frame: the host loop notices a game
+ * frame up to one display refresh after it was due (it waits for vsync), and
+ * stopping at the newest frame until then froze the camera for a refresh, a
+ * judder every few frames while moving. */
+#define INTERP_DELAY_US 5000.0 /* plus one game frame: what is shown lies between two known frames */
+#define INTERP_MAX_ALPHA 1.35  /* if the newest frame is late, extrapolate at most a third of a frame */
 static double interp_alpha(void) {
+    sp_a = sp_prev;
+    sp_b = sp_cur;
     if (exact_camera || !sp_cur->valid) return 1;
     double frame_us = sp_cur->t > sp_prev->t ? (double)(sp_cur->t - sp_prev->t) : 40000;
     if (frame_us < 10000) frame_us = 10000;
-    double a = (double)(host_time_us() - sp_cur->t) / frame_us;
-    return a < 0 ? 0 : a > 1 ? 1 : a;
+    double show = (double)host_time_us() - INTERP_DELAY_US - frame_us; /* the moment drawn */
+    if (show < (double)sp_prev->t && sp_old->valid && sp_prev->t > sp_old->t) { /* between k-2 and k-1 */
+        sp_a = sp_old;
+        sp_b = sp_prev;
+    }
+    double span = sp_b->t > sp_a->t ? (double)(sp_b->t - sp_a->t) : frame_us;
+    double a = (show - (double)sp_a->t) / span;
+    return a < 0 ? 0 : a > INTERP_MAX_ALPHA ? INTERP_MAX_ALPHA : a;
 }
 static double frame_alpha; /* alpha for the frame being drawn */
 
@@ -240,11 +276,11 @@ static inline double blend(double a, double b) {
 
 /* wall vector end points as drawn */
 static void vec_coords(int i, uint32_t v, double c[4]) {
-    if (exact_camera || i >= sp_cur->nvec) {
+    if (exact_camera || i >= sp_b->nvec) {
         for (int k = 0; k < 4; k++) c[k] = (int16_t)MEMR16(v + 0xc + 2 * k);
         return;
     }
-    for (int k = 0; k < 4; k++) c[k] = blend(sp_prev->vec[i][k], sp_cur->vec[i][k]);
+    for (int k = 0; k < 4; k++) c[k] = blend(sp_a->vec[i][k], sp_b->vec[i][k]);
 }
 
 /* object position as drawn; idx is its index in the object list (or -1) */
@@ -253,14 +289,14 @@ static void obj_coords(uint32_t o, int idx, double *x, double *y) {
     *y = (int16_t)MEMR16(o + 0x12);
     if (exact_camera) return;
     int c = -1, p = -1;
-    if (idx >= 0 && idx < sp_cur->nobj && sp_cur->obj[idx] == o) c = idx;
-    else for (int i = 0; i < sp_cur->nobj; i++) if (sp_cur->obj[i] == o) { c = i; break; }
+    if (idx >= 0 && idx < sp_b->nobj && sp_b->obj[idx] == o) c = idx;
+    else for (int i = 0; i < sp_b->nobj; i++) if (sp_b->obj[i] == o) { c = i; break; }
     if (c < 0) return;
-    if (c < sp_prev->nobj && sp_prev->obj[c] == o) p = c;
-    else for (int i = 0; i < sp_prev->nobj; i++) if (sp_prev->obj[i] == o) { p = i; break; }
-    if (p < 0) { *x = sp_cur->oxy[c][0]; *y = sp_cur->oxy[c][1]; return; }
-    *x = blend(sp_prev->oxy[p][0], sp_cur->oxy[c][0]);
-    *y = blend(sp_prev->oxy[p][1], sp_cur->oxy[c][1]);
+    if (c < sp_a->nobj && sp_a->obj[c] == o) p = c;
+    else for (int i = 0; i < sp_a->nobj; i++) if (sp_a->obj[i] == o) { p = i; break; }
+    if (p < 0) { *x = sp_b->oxy[c][0]; *y = sp_b->oxy[c][1]; return; }
+    *x = blend(sp_a->oxy[p][0], sp_b->oxy[c][0]);
+    *y = blend(sp_a->oxy[p][1], sp_b->oxy[c][1]);
 }
 
 /* the game is drawing the 3D view (a game frame within the last 150 ms) */
@@ -278,10 +314,10 @@ static void project_setup(cam_t *cam) {
     }
     double ang = ds16(0x4bda);
     frame_alpha = interp_alpha();
-    if (!exact_camera && sp_cur->valid) {
-        cam->px = sp_prev->px + frame_alpha * (sp_cur->px - sp_prev->px);
-        cam->py = sp_prev->py + frame_alpha * (sp_cur->py - sp_prev->py);
-        ang = sp_prev->kang + frame_alpha * wrap180(sp_cur->kang - sp_prev->kang) + mouse_cum + turn_offset;
+    if (!exact_camera && sp_b->valid) {
+        cam->px = sp_a->px + frame_alpha * (sp_b->px - sp_a->px);
+        cam->py = sp_a->py + frame_alpha * (sp_b->py - sp_a->py);
+        ang = sp_a->kang + frame_alpha * wrap180(sp_b->kang - sp_a->kang) + mouse_cum + turn_offset;
     }
     if (fabs(wrap180(ang - ds16(0x4bda))) > 1e-9) { /* tables: cos slot = 1024 sin(a), sin slot = 1024 cos(a), clockwise from north */
         double a = ang * (3.14159265358979323846 / 180.0);
@@ -322,7 +358,7 @@ static void draw_wall_columns(void *ctx, int x0, int x1) {
         float step = (float)(64.0 / (2.0 * half));
         float vpos = (float)((y0 + 0.5 - top) * step);
         float u = col_u[x], fu = col_fu[x];
-        if (y1 > y0) hq_column(t, u, fu, vpos, step, y1 - y0, view_buf + (size_t)y0 * bw + x, bw);
+        if (y1 > y0) hq_column_span(t, u, fu, col_umin[x], col_umax[x], vpos, step, y1 - y0, view_buf + (size_t)y0 * bw + x, bw);
     }
 }
 
@@ -411,15 +447,26 @@ static void render_walls(const cam_t *cam) {
         double hx = x1 + t * (x2 - x1), hy = y1 + t * (y2 - y1);
         int far_end = ((flags & 0x20) != 0) ^ (type == 0x40 || type == 0x3f);
         int mirror = type != 2 && (facing == 0 || facing == 3);
-        double u;
+        double u, ua, ub; /* ua..ub: texels the whole piece spans */
         if (facing <= 1) {
             if (hx > x2 - 0.01) hx = x2 - 0.01;
             u = far_end ? hx - x2 + 0x80 : hx - x1;
+            ua = far_end ? x1 - x2 + 0x80 : 0;
+            ub = far_end ? 0x80 : x2 - x1;
         } else {
             if (hy > y2 - 0.01) hy = y2 - 0.01;
             u = far_end ? y2 - hy - 0x80 : y1 - hy;
+            ua = far_end ? -0x80 : y1 - y2;
+            ub = far_end ? y2 - y1 - 0x80 : 0;
         }
-        if (mirror) u = -u;
+        if (mirror) { u = -u; double t2 = -ua; ua = -ub; ub = t2; }
+        if (ub - ua >= tw) { ua = -1e9; ub = 1e9; } /* the piece repeats the texture: let it wrap */
+        else { /* same wrap as the sampler: shift the span next to u */
+            double k = floor((u - ua) / tw) * tw;
+            ua += k; ub += k;
+        }
+        col_umin[x] = (float)ua;
+        col_umax[x] = (float)ub;
         const uint8_t *remap = NULL;
         if (shading && (shade_all || facing >= 2)) remap = LP(SEGLIN(RT_SEL_DS, 0x8084));
         if (i != last_vec || remap != last_remap) {
@@ -534,10 +581,10 @@ static void render_sprites(const cam_t *cam) {
     }
     for (int i = 0; i < 8; i++) { /* projectiles (FUN_1010_9d72), as of the newest snapshot */
         uint16_t b = (uint16_t)(0x4c3a + i * 0x2a);
-        uint8_t state = exact_camera ? ds8((uint16_t)(b + 0xc)) : sp_cur->pstate[i];
-        double x = exact_camera ? ds16((uint16_t)(b + 0x1e)) : sp_cur->pxy[i][0];
-        double y = exact_camera ? ds16((uint16_t)(b + 0x20)) : sp_cur->pxy[i][1];
-        if (!exact_camera && sp_prev->pstate[i] == state) { x = blend(sp_prev->pxy[i][0], x); y = blend(sp_prev->pxy[i][1], y); }
+        uint8_t state = exact_camera ? ds8((uint16_t)(b + 0xc)) : sp_b->pstate[i];
+        double x = exact_camera ? ds16((uint16_t)(b + 0x1e)) : sp_b->pxy[i][0];
+        double y = exact_camera ? ds16((uint16_t)(b + 0x20)) : sp_b->pxy[i][1];
+        if (!exact_camera && sp_a->pstate[i] == state) { x = blend(sp_a->pxy[i][0], x); y = blend(sp_a->pxy[i][1], y); }
         if (state == 1) {
             if (fabs(x - cam->px) <= 0x14 && fabs(y - cam->py) <= 0x14) continue;
         } else if (state == 2) {
@@ -705,25 +752,29 @@ void hd_view_drawn(void) {
     if (need > view_cap) { free(view_buf); view_buf = malloc(need * sizeof *view_buf); view_cap = need; }
     if ((size_t)(RX1 - RX0) > col_cap) {
         col_cap = (size_t)(RX1 - RX0);
-        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu);
+        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax);
         zbuf = malloc(col_cap * sizeof *zbuf);
         col_vec = malloc(col_cap * sizeof *col_vec);
         col_t = malloc(col_cap * sizeof *col_t);
         col_tex = malloc(col_cap * sizeof *col_tex);
         col_u = malloc(col_cap * sizeof *col_u);
         col_fu = malloc(col_cap * sizeof *col_fu);
+        col_umin = malloc(col_cap * sizeof *col_umin);
+        col_umax = malloc(col_cap * sizeof *col_umax);
     }
     if (need < 320 * 200) need = 320 * 200;
     if (need > view_cap) { free(view_buf); view_buf = malloc(need * sizeof *view_buf); view_cap = need; }
     if (col_cap < 320) {
         col_cap = 320;
-        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu);
+        free(zbuf); free(col_vec); free(col_t); free(col_tex); free(col_u); free(col_fu); free(col_umin); free(col_umax);
         zbuf = malloc(col_cap * sizeof *zbuf);
         col_vec = malloc(col_cap * sizeof *col_vec);
         col_t = malloc(col_cap * sizeof *col_t);
         col_tex = malloc(col_cap * sizeof *col_tex);
         col_u = malloc(col_cap * sizeof *col_u);
         col_fu = malloc(col_cap * sizeof *col_fu);
+        col_umin = malloc(col_cap * sizeof *col_umin);
+        col_umax = malloc(col_cap * sizeof *col_umax);
     }
     compare_with_original(d);
     take_snapshot();
@@ -779,7 +830,7 @@ int hd_rerender(void) {
     }
     cam_t cam;
     project_setup(&cam);
-    if (getenv("N3D_TURNLOG")) fprintf(stderr, "cam %llu %.2f %.2f %.2f\n", (unsigned long long)(host_time_us() / 1000), cam.px, cam.py, atan2(cam.c, cam.s) * 57.2957795);
+    if (getenv("N3D_TURNLOG")) fprintf(stderr, "cam %llu %.2f %.2f %.2f\n", (unsigned long long)host_time_us(), cam.px, cam.py, atan2(cam.c, cam.s) * 57.2957795);
     render_walls(&cam);
     no_animate = 1;
     render_sprites(&cam);

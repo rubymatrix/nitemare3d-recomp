@@ -109,7 +109,7 @@ void host_get_palette_entry(int i, uint8_t *r, uint8_t *g, uint8_t *b) {
 #ifdef __EMSCRIPTEN__
 static int target_fps = 0;       /* --fps; the browser already paces frames to the display */
 #else
-static int target_fps = 60;      /* --fps */
+static int target_fps = 0;       /* --fps; 0 = one redraw per display refresh (vsync-paced, no judder) */
 #endif
 static uint64_t next_due;        /* when the next paced frame is due */
 static uint64_t last_redraw_us;
@@ -159,6 +159,7 @@ static void debug_shot(void) {
     const char *dir = getenv("N3D_SHOTS");
     static int every = 0, seen = 0;
     if (!dir) return;
+    if (getenv("N3D_SHOTS_AFTER") && SDL_GetTicks() < (uint32_t)atoi(getenv("N3D_SHOTS_AFTER"))) return;
     if (!every) every = getenv("N3D_SHOTS_EVERY") ? atoi(getenv("N3D_SHOTS_EVERY")) : 1;
     if (every < 1) every = 1;
     if (seen++ % every || count >= 2000) return;
@@ -376,12 +377,19 @@ static void web_audio_pump(void);
 /* The game's blocking loops (palette fades poll the retrace port, waits read
  * the clock) keep the browser's main thread busy for up to half a second;
  * every clock read tops up the audio queue so the sound keeps going. */
-uint32_t host_ticks_ms(void) { web_audio_pump(); return SDL_GetTicks(); }
 uint64_t host_time_us(void) { web_audio_pump(); return (uint64_t)(emscripten_get_now() * 1000.0); }
 #else
-uint32_t host_ticks_ms(void) { return SDL_GetTicks(); }
 uint64_t host_time_us(void) { return SDL_GetPerformanceCounter() * 1000000ull / SDL_GetPerformanceFrequency(); }
 #endif
+/* The game's clock (GetTickCount / timeGetTime): milliseconds since the first
+ * read, on the same time base as host_time_us, so the hi-res renderer can
+ * place the game's frames exactly on it (hd.c, take_snapshot). */
+uint64_t host_clock_base_us(void) {
+    static uint64_t base;
+    if (!base) base = host_time_us();
+    return base;
+}
+uint32_t host_ticks_ms(void) { return (uint32_t)((host_time_us() - host_clock_base_us()) / 1000); }
 
 int host_message_box(const char *caption, const char *text, unsigned type) {
     fprintf(stderr, "[%s] %s\n", caption, text);
@@ -419,8 +427,12 @@ void host_request_quit(void) { quit_requested = 1; }
 
 /* ------------------------------------------------------------------ audio */
 #define MIX_RATE 44100
-static int16_t *wave_buf;     /* converted to MIX_RATE mono s16 */
-static uint32_t wave_len, wave_pos;
+/* Sound effects. The original had a single waveOut channel and dropped a new
+ * effect while a higher-priority one was still playing; here every effect gets
+ * its own voice and they are mixed. */
+#define MAX_VOICES 16
+typedef struct { int16_t *buf; uint32_t len, pos; int vol_l, vol_r; } voice_t;
+static voice_t sfx[MAX_VOICES];        /* buf converted to MIX_RATE mono s16 */
 static int wave_vol_l = 65535, wave_vol_r = 65535;
 
 /* Debug aid: N3D_WAVOUT=file.wav records the mixed output. */
@@ -443,11 +455,12 @@ static void audio_callback(void *ud, Uint8 *stream, int len) {
     int16_t *out = (int16_t *)stream;
     int frames = len / 4;
     music_render(out, frames, MIX_RATE);
-    for (int i = 0; i < frames; i++) {
-        if (wave_pos < wave_len) {
-            int s = wave_buf[wave_pos++];
-            int l = out[2 * i] + (s * wave_vol_l >> 16);
-            int r = out[2 * i + 1] + (s * wave_vol_r >> 16);
+    for (int v = 0; v < MAX_VOICES; v++) {
+        voice_t *vo = &sfx[v];
+        for (int i = 0; i < frames && vo->pos < vo->len; i++) {
+            int s = vo->buf[vo->pos++];
+            int l = out[2 * i] + (s * vo->vol_l >> 16);
+            int r = out[2 * i + 1] + (s * vo->vol_r >> 16);
             out[2 * i] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l);
             out[2 * i + 1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r);
         }
@@ -570,22 +583,28 @@ void host_wave_play(const uint8_t *data, uint32_t len, uint32_t rate, int bits, 
         buf[i] = (int16_t)s;
     }
     SDL_LockAudioDevice(audio_dev);
-    free(wave_buf);
-    wave_buf = buf;
-    wave_len = out_frames;
-    wave_pos = 0;
+    /* free voice, else steal the one closest to finishing */
+    int best = 0;
+    uint32_t best_left = UINT32_MAX;
+    for (int v = 0; v < MAX_VOICES; v++) {
+        uint32_t left = sfx[v].pos < sfx[v].len ? sfx[v].len - sfx[v].pos : 0;
+        if (left < best_left) { best_left = left; best = v; }
+    }
+    free(sfx[best].buf);
+    sfx[best] = (voice_t){buf, out_frames, 0, wave_vol_l, wave_vol_r};
     SDL_UnlockAudioDevice(audio_dev);
 }
 
 void host_wave_stop(void) {
     SDL_LockAudioDevice(audio_dev);
-    wave_pos = wave_len;
+    for (int v = 0; v < MAX_VOICES; v++) sfx[v].pos = sfx[v].len;
     SDL_UnlockAudioDevice(audio_dev);
 }
 
 int host_wave_playing(void) {
     SDL_LockAudioDevice(audio_dev);
-    int p = wave_pos < wave_len;
+    int p = 0;
+    for (int v = 0; v < MAX_VOICES; v++) p |= sfx[v].pos < sfx[v].len;
     SDL_UnlockAudioDevice(audio_dev);
     return p;
 }
@@ -931,11 +950,13 @@ static void usage(const char *argv0) {
             "  --classic    original 320x200 frame, scaled (same as --res 320x200)\n"
             "  --scale N    initial window size: 320x240 * N\n"
             "  --fullscreen start in fullscreen (Alt+Enter toggles)\n"
+            "  --renderer metal|opengl   SDL render backend (default: SDL's choice)\n"
+            "  --no-spaces  macOS: fullscreen without a separate Space (can avoid tearing)\n"
             "  --hidpi / --no-hidpi  render at device pixels on HiDPI screens (default: on; off in the browser)\n"
             "  --sensitivity F  mouse look speed in degrees per mouse count (default 0.12)\n"
             "  --no-mouselook   don't capture the mouse for turning during play\n"
             "  --pad-turn F     gamepad turn speed, degrees per second at full right-stick deflection (default 200)\n"
-            "  --fps N      hi-res redraw rate during play (default 60; 0 = every display refresh)\n"
+            "  --fps N      hi-res redraw rate during play (default 0 = every display refresh, vsync)\n"
             "  --filter nearest|bilinear|trilinear|aniso   texture filtering (default aniso)\n"
             "  --aniso N    anisotropic taps, 1..16 (default 16)\n"
             "  --upscale none|scale2x|scale3x|scale4x|scale6x   pixel-art upscaling of textures (default scale4x)\n"
@@ -1030,8 +1051,11 @@ static void main_iteration(void) {
                         kb_fire = kb_use = mouse_fire = mouse_use = 0;
                         sync_buttons();
                     }
-                    uint16_t a[1] = {(uint16_t)active};
-                    rt_callf(G_ON_ACTIVATE, 1, a);
+                    /* The game's own OnActivateApp handler (G_ON_ACTIVATE) stops the
+                     * music on deactivate and restarts the menu tune (#12) on
+                     * reactivate. Pause/resume the host audio instead so music and
+                     * effects pick up where they left off. */
+                    if (audio_dev) SDL_PauseAudioDevice(audio_dev, !active);
                 }
             }
             if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) follow_window_size();
@@ -1076,7 +1100,8 @@ static void main_iteration(void) {
 int main(int argc, char **argv) {
     const char *data_dir = "data";
     const char *user_dir = NULL;
-    int scale = 3, force_fm = 0;
+    int scale = 3, force_fm = 0, no_spaces = 0;
+    const char *renderer_name = NULL;
 #ifdef __EMSCRIPTEN__
     int hidpi = 0; /* full device-pixel resolution is opt-in: the renderer is single-threaded here */
 #else
@@ -1091,6 +1116,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) user_dir = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
+        else if (!strcmp(argv[i], "--renderer") && i + 1 < argc) renderer_name = argv[++i];
+        else if (!strcmp(argv[i], "--no-spaces")) no_spaces = 1;
         else if (!strcmp(argv[i], "--hidpi")) hidpi = 1;
         else if (!strcmp(argv[i], "--no-hidpi")) hidpi = 0;
         else if (!strcmp(argv[i], "--soundfont") && i + 1 < argc) soundfont = argv[++i];
@@ -1163,6 +1190,9 @@ int main(int argc, char **argv) {
     }
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
+    if (renderer_name) SDL_SetHint(SDL_HINT_RENDER_DRIVER, renderer_name);
+    if (no_spaces) SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "0");
     int win_w = 320 * scale, win_h = 240 * scale;
     {
         SDL_DisplayMode dm;
@@ -1180,6 +1210,13 @@ int main(int argc, char **argv) {
     SDL_RaiseWindow(window); /* take focus so the mouse is captured from the start */
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) renderer = SDL_CreateRenderer(window, -1, 0);
+    if (getenv("N3D_DEBUG")) {
+        SDL_RendererInfo ri;
+        SDL_GetRendererInfo(renderer, &ri);
+        SDL_DisplayMode dm;
+        SDL_GetCurrentDisplayMode(0, &dm);
+        fprintf(stderr, "renderer: %s vsync=%d display %dx%d@%dHz\n", ri.name, (ri.flags & SDL_RENDERER_PRESENTVSYNC) != 0, dm.w, dm.h, dm.refresh_rate);
+    }
     {
         int w = render_w, h = render_h;
         render_w = render_h = 0;

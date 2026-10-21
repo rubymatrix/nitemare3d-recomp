@@ -202,7 +202,14 @@ static void free_tex(hq_tex *t) {
     memset(t, 0, sizeof *t);
 }
 
+static size_t tex_bytes(const hq_tex *t) {
+    size_t b = 0;
+    for (int l = 0; l < t->nlev; l++) b += sizeof(uint32_t) * (size_t)t->lw[l] * t->lh[l];
+    return b;
+}
+
 static void flush_all(void) {
+    if (getenv("N3D_HDPROF")) fprintf(stderr, "texture cache flush (%zu MB)\n", cache_bytes >> 20);
     for (int i = 0; i < ENTRIES; i++) {
         free(entries[i].up);
         free(entries[i].src);
@@ -306,6 +313,10 @@ static void build_job(void *ctx, int b, int e) {
 
 void hq_build_pending(void) {
     if (!npend) return;
+    for (int i = 0; i < npend; i++) { /* the old colours are freed by the rebuild */
+        size_t old = tex_bytes(pend[i].t);
+        cache_bytes = cache_bytes > old ? cache_bytes - old : 0;
+    }
     hq_parallel(build_job, NULL, npend);
     for (int i = 0; i < npend; i++) { cache_bytes += pend[i].bytes; pend[i].t->pending = 0; }
     builds += (unsigned)npend;
@@ -452,8 +463,15 @@ uint32_t hq_sample(const hq_tex *t, float u, float v, float fu, float fv) {
  * resolved once per column; per row only the v position changes. */
 typedef struct { const uint32_t *c0, *c1; uint32_t fx; } colpair_t;
 
-static inline void colpair(const hq_tex *t, int l, float U, colpair_t *p) {
-    float x = U * t->su[l] - 0.5f, fl = floorf(x);
+/* lo/hi: the level-0 texel span the surface uses (lo < hi); the bilinear
+ * pair is kept inside it so a wall piece never blends in texels beyond its
+ * end (wall pieces use part of their texture, and u wraps). */
+static inline void colpair(const hq_tex *t, int l, float U, float lo, float hi, colpair_t *p) {
+    float x = U * t->su[l] - 0.5f;
+    float a = lo * t->su[l], b = hi * t->su[l] - 1.0f; /* first texel / last pair start */
+    if (b >= a) x = x < a ? a : x > b ? b : x;
+    else x = 0.5f * (a + b);
+    float fl = floorf(x);
     int w = t->lw[l], h = t->lh[l], xa = (int)fl, xb = xa + 1;
     p->fx = (uint32_t)((x - fl) * 256.0f);
     if (t->wrap) {
@@ -477,7 +495,12 @@ static inline uint32_t colpair_sample(const colpair_t *p, int h, float y) {
 }
 
 void hq_column(const hq_tex *t, float u, float fu, float v0, float dv, int n, uint32_t *out, int stride) {
+    hq_column_span(t, u, fu, -1e9f, 1e9f, v0, dv, n, out, stride);
+}
+
+void hq_column_span(const hq_tex *t, float u, float fu, float umin, float umax, float v0, float dv, int n, uint32_t *out, int stride) {
     float S = (float)t->scale;
+    float LO = umin * S, HI = umax * S;
     float U = u * S, FU = fabsf(fu) * S, V0 = v0 * S, DV = dv * S, FV = fabsf(DV);
     int H0 = t->lh[0];
     if (hq.filter == HQ_NEAREST) {
@@ -512,7 +535,7 @@ void hq_column(const hq_tex *t, float u, float fu, float v0, float dv, int n, ui
     colpair_t cp[2][16];
     int ncp = along_u ? taps : 1;
     for (int li = 0; li < nl; li++)
-        for (int k = 0; k < ncp; k++) colpair(t, l0 + li, along_u ? U + first + k * step : U, &cp[li][k]);
+        for (int k = 0; k < ncp; k++) colpair(t, l0 + li, along_u ? U + first + k * step : U, LO, HI, &cp[li][k]);
     float V = V0;
     for (int r = 0; r < n; r++, V += DV, out += stride) {
         uint32_t res[2];

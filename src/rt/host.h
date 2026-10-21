@@ -25,6 +25,7 @@ int host_modern_input(int *forward, int *strafe, int *turn_degrees);
 /* System */
 uint32_t host_ticks_ms(void);
 uint64_t host_time_us(void);
+uint64_t host_clock_base_us(void); /* host_ticks_ms() counts from here, on host_time_us's time base */
 int host_message_box(const char *caption, const char *text, unsigned type);
 void host_request_quit(void);
 /* Called on every Win16 API call / software interrupt: the browser host tops
